@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>fog mirror</title>
+<style>
+  :root { color-scheme: dark; --cream:#f2eee7; --glass:rgba(20,25,28,.35); }
+  * { box-sizing:border-box; }
+  html,body { margin:0; width:100%; height:100%; overflow:hidden; background:#111; color:var(--cream); font-family: Georgia, 'Times New Roman', serif; }
+  body { min-height:100dvh; }
+  #app { position:relative; width:100%; height:100%; isolation:isolate; background:#101315; }
+  #mirror { position:absolute; inset:0; width:100%; height:100%; display:block; }
+  #video { display:none; }
+  #start { position:absolute; inset:0; z-index:5; display:grid; place-items:center; padding:24px; background:radial-gradient(ellipse at 50% 46%,rgba(77,89,92,.32),rgba(11,14,15,.96) 73%); text-align:center; }
+  #start.hidden { display:none; }
+  .card { max-width:530px; padding:clamp(25px,6vw,54px); border:1px solid rgba(240,238,231,.25); border-radius:4px; background:rgba(13,16,17,.54); box-shadow:0 22px 80px rgba(0,0,0,.4),inset 0 1px rgba(255,255,255,.07); backdrop-filter:blur(16px); }
+  h1 { margin:0 0 16px; font-weight:400; font-size:clamp(37px,8vw,66px); letter-spacing:.04em; line-height:1; }
+  .dek { margin:0 auto 29px; max-width:390px; color:rgba(242,238,231,.73); font-size:clamp(15px,2.3vw,18px); line-height:1.5; }
+  .privacy { margin:18px auto 0; max-width:365px; color:rgba(242,238,231,.48); font:12px/1.55 system-ui,sans-serif; }
+  button { border:1px solid rgba(242,238,231,.65); border-radius:999px; background:rgba(242,238,231,.1); color:var(--cream); padding:13px 25px; font:600 12px system-ui,sans-serif; letter-spacing:.12em; text-transform:uppercase; cursor:pointer; transition:background .2s,transform .2s; }
+  button:hover { background:rgba(242,238,231,.22); transform:translateY(-1px); }
+  button:active { transform:translateY(0); }
+  #error { min-height:20px; margin:19px 0 0; color:#f3b6a9; font:13px/1.4 system-ui,sans-serif; }
+  #hud { position:absolute; z-index:3; inset:0; pointer-events:none; opacity:0; transition:opacity .8s; }
+  #hud.live { opacity:1; }
+  #hint { position:absolute; top:23px; left:50%; transform:translateX(-50%); color:rgba(242,238,231,.56); font:11px system-ui,sans-serif; letter-spacing:.08em; text-transform:uppercase; white-space:nowrap; }
+  #brush-control { position:absolute; left:20px; bottom:max(19px,env(safe-area-inset-bottom)); display:flex; align-items:center; gap:10px; pointer-events:auto; padding:9px 12px; border:1px solid rgba(242,238,231,.33); border-radius:999px; background:rgba(235,236,229,.12); backdrop-filter:blur(15px); box-shadow:0 5px 20px rgba(0,0,0,.16); }
+  #brush-control label { color:rgba(242,238,231,.86); font:12px system-ui,sans-serif; }
+  #brush { width:116px; accent-color:#fff; }
+  #shutter { position:absolute; right:20px; bottom:max(19px,env(safe-area-inset-bottom)); width:44px; height:44px; padding:0; border:1px solid rgba(242,238,231,.54); background:rgba(235,236,229,.12); pointer-events:auto; }
+  #shutter::after { content:''; position:absolute; inset:10px; border:2px solid rgba(242,238,231,.9); border-radius:50%; }
+  #permission { position:absolute; inset:0; display:none; place-items:center; padding:28px; z-index:4; background:rgba(12,15,16,.64); text-align:center; }
+  #permission.show { display:grid; }
+  #permission p { max-width:430px; font:16px/1.5 system-ui,sans-serif; color:#f2eee7; }
+  @media (max-width:500px) { #hint { top:13px; font-size:9px; } #brush-control { left:12px; } #shutter { right:12px; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="mirror" aria-label="Live fog mirror"></canvas>
+  <section id="start">
+    <div class="card">
+      <h1>fog mirror</h1>
+      <p class="dek">Breathe on the glass. Pinch to draw through the fog. Make a fist to wipe it clean.</p>
+      <button id="begin">step into the mirror</button>
+      <p class="privacy">Your camera and microphone stay on this device. Nothing is recorded, uploaded, or sent anywhere.</p>
+      <p id="error" role="alert"></p>
+    </div>
+  </section>
+  <div id="permission"><p id="permission-text"></p></div>
+  <div id="hud">
+    <div id="hint">space to breathe · pinch to draw · fist to wipe · esc to leave</div>
+    <div id="brush-control"><label for="brush">brush</label><input id="brush" type="range" min="7" max="38" value="15"></div>
+    <button id="shutter" type="button" aria-label="Save current frame"></button>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/face_detection.js"></script>
+<script>
+'use strict';
+const video=document.querySelector('#video'), canvas=document.querySelector('#mirror'), ctx=canvas.getContext('2d');
+const start=document.querySelector('#start'), begin=document.querySelector('#begin'), errorBox=document.querySelector('#error');
+const hud=document.querySelector('#hud'), fog=document.createElement('canvas'), fogCtx=fog.getContext('2d');
+const frost=document.createElement('canvas'), frostCtx=frost.getContext('2d');
+const brushInput=document.querySelector('#brush'), shutter=document.querySelector('#shutter'), permission=document.querySelector('#permission'), permissionText=document.querySelector('#permission-text');
+let stream, hands, face, audioContext, analyser, audioData, raf=0, lastHandSend=Promise.resolve(), lastFaceFrame=0, frame=0, dpr=1;
+let w=0,h=0, shortEdge=0, floor=0.006, fogStrength=0.55, fogX=.5, fogY=.49, rawFogX=.5, rawFogY=.49, mouthSeen=false, lastKey=0, spaceDown=false;
+let penDown=false, missed=0, rawPoint=null, smoothPoint=null, brushPoint=null, previousBrush=null, lastWipe=null, lastWipeHand=null, pinchStar=null;
+
+function resize(){ dpr=Math.min(2,window.devicePixelRatio||1); w=innerWidth; h=innerHeight; shortEdge=Math.min(w,h); for(const c of [canvas,fog,frost]){c.width=Math.round(w*dpr);c.height=Math.round(h*dpr);c.style.width=w+'px';c.style.height=h+'px';} fogCtx.setTransform(dpr,0,0,dpr,0,0); frostCtx.setTransform(dpr,0,0,dpr,0,0); ctx.setTransform(dpr,0,0,dpr,0,0); }
+window.addEventListener('resize',resize); resize();
+function mirrorPoint(p){return {x:(1-p.x)*w,y:p.y*h};}
+function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y);}
+function midpoint(a,b){return {x:(a.x+b.x)/2,y:(a.y+b.y)/2};}
+function clearFog(){fogCtx.clearRect(0,0,w,h);fogCtx.fillStyle='rgba(255,255,255,'+fogStrength+')';fogCtx.fillRect(0,0,w,h);}
+function stampErase(x,y,r,alpha=.34){let g=fogCtx.createRadialGradient(x,y,0,x,y,r);g.addColorStop(0,'rgba(0,0,0,'+alpha+')');g.addColorStop(.65,'rgba(0,0,0,'+(alpha*.5)+')');g.addColorStop(1,'rgba(0,0,0,0)');fogCtx.save();fogCtx.globalCompositeOperation='destination-out';fogCtx.fillStyle=g;fogCtx.beginPath();fogCtx.arc(x,y,r,0,Math.PI*2);fogCtx.fill();fogCtx.restore();}
+function erasePath(x,y,r){if(!lastWipe){stampErase(x,y,r);lastWipe={x,y};return;} const d=dist(lastWipe,{x,y}); if(d>shortEdge*.3){stampErase(x,y,r);lastWipe={x,y};return;} const step=Math.max(1,r*.5), n=Math.min(40,Math.max(1,Math.ceil(d/step))); for(let i=1;i<=n;i++) stampErase(lastWipe.x+(x-lastWipe.x)*i/n,lastWipe.y+(y-lastWipe.y)*i/n,r); lastWipe={x,y};}
+function isFist(lm){const wrist=lm[0]; return [8,12,16,20].every((tip,i)=>dist(lm[tip],wrist)<dist(lm[[6,10,14,18][i]],wrist));}
+function indexExtended(lm){return dist(lm[8],lm[0])>dist(lm[6],lm[0])*1.10;}
+function handleHands(result){const lm=result.multiHandLandmarks&&result.multiHandLandmarks[0]; if(!lm){missed++; if(missed>2&&performance.now()-lastHandSeen>250) penDown=false; return;} missed=0; lastHandSeen=performance.now();
+  const thumb=lm[4], tip=lm[8], wrist=lm[0], middle=lm[9], handWidth=Math.max(dist(lm[5],lm[17]),dist(wrist,middle))*w;
+  const p=mirrorPoint(tip), ratio=dist(thumb,tip)/Math.max(.0001,dist(wrist,middle)), fist=isFist(lm), now=performance.now();
+  if(fist){ if(penDown){penDown=false; previousBrush=null;} lastWipeHand=p; erasePath(p.x,p.y,handWidth*1.6); lastWipe=p; pinchStar=null; return; }
+  const canStart=indexExtended(lm); if(!penDown && ratio<.22 && canStart){penDown=true; rawPoint=p; smoothPoint=p; brushPoint=p; previousBrush=null;}
+  if(penDown && ratio>.38){penDown=false; previousBrush=null;}
+  if(penDown){rawPoint={x:rawPoint.x+(p.x-rawPoint.x)*.45,y:rawPoint.y+(p.y-rawPoint.y)*.45}; smoothPoint={x:smoothPoint.x+(rawPoint.x-smoothPoint.x)*.22,y:smoothPoint.y+(rawPoint.y-smoothPoint.y)*.22}; if(!brushPoint)brushPoint=smoothPoint; brushPoint={x:brushPoint.x+(smoothPoint.x-brushPoint.x)*.22,y:brushPoint.y+(smoothPoint.y-brushPoint.y)*.22}; const r=+brushInput.value; if(previousBrush&&dist(previousBrush,brushPoint)>w*.0006){fogCtx.save();fogCtx.globalCompositeOperation='destination-out';fogCtx.strokeStyle='rgba(0,0,0,1)';fogCtx.lineWidth=r*2;fogCtx.lineCap='round';fogCtx.beginPath();const m=midpoint(previousBrush,brushPoint);fogCtx.moveTo(previousBrush.x,previousBrush.y);fogCtx.quadraticCurveTo(previousBrush.x,previousBrush.y,m.x,m.y);fogCtx.quadraticCurveTo(brushPoint.x,brushPoint.y,brushPoint.x,brushPoint.y);fogCtx.stroke();fogCtx.restore();} previousBrush={...brushPoint}; pinchStar={x:pinchStar?pinchStar.x+(p.x-pinchStar.x)*.55:p.x,y:pinchStar?pinchStar.y+(p.y-pinchStar.y)*.55:p.y}; }
+  else pinchStar=null;
+}
+let lastHandSeen=0;
+function handleFace(result){const box=result.detections&&result.detections[0]&&result.detections[0].boundingBox;if(!box)return; const x=1-(box.xCenter||.5), y=(box.yCenter||.5)+(box.height||.2)*.22; rawFogX+= (x-rawFogX)*.4; rawFogY+=(y-rawFogY)*.4; mouthSeen=true;}
+function feedHands(){if(!hands)return; lastHandSend=lastHandSend.then(()=>hands.send({image:video})).catch(()=>{});}
+function fogFromBreath(){if(spaceDown||performance.now()-lastKey<300||penDown||!analyser)return; analyser.getByteTimeDomainData(audioData); let level=0;for(const v of audioData){const n=(v-128)/128;level+=n*n;} level=Math.sqrt(level/audioData.length); if(level<floor)floor+=(level-floor)*.05; else floor+=(level-floor)*.0008; const amount=Math.max(0,Math.min(1,(level-floor-.0025)/.0005)); if(amount<=0)return; if(!mouthSeen){rawFogX=.5;rawFogY=.5;} fogX+=(rawFogX-fogX)*.4;fogY+=(rawFogY-fogY)*.4; if(frame%2)return; const spread=shortEdge*.43; for(let i=0;i<12;i++){const a=Math.random()*Math.PI*2, rr=Math.sqrt(Math.random())*spread, x=fogX*w+Math.cos(a)*rr*1.45, y=fogY*h+Math.sin(a)*rr, r=shortEdge*(.07+Math.random()*.055);fogCtx.save();fogCtx.globalCompositeOperation='source-over';fogCtx.filter='blur('+(r*.6)+'px)';fogCtx.fillStyle='rgba(255,255,255,'+(.36*amount)+')';fogCtx.beginPath();fogCtx.arc(x,y,r,0,Math.PI*2);fogCtx.fill();fogCtx.restore();}}
+function render(){frame++; if(video.readyState>=2){ctx.save();ctx.scale(-1,1);ctx.drawImage(video,-w,0,w,h);ctx.restore(); frostCtx.clearRect(0,0,w,h); frostCtx.save();frostCtx.filter='blur(18px) brightness(1.18)';frostCtx.drawImage(video,0,0,w,h);frostCtx.restore(); frostCtx.globalCompositeOperation='source-in';frostCtx.fillStyle='rgba(242,238,231,.62)';frostCtx.fillRect(0,0,w,h);frostCtx.globalCompositeOperation='source-over'; frostCtx.globalCompositeOperation='destination-in';frostCtx.drawImage(fog,0,0,w,h);frostCtx.globalCompositeOperation='source-over';ctx.drawImage(frost,0,0,w,h); }
+  fogFromBreath(); if(pinchStar){ctx.save();ctx.shadowBlur=15;ctx.shadowColor='rgba(255,249,219,.95)';ctx.fillStyle='rgba(255,250,225,.9)';ctx.beginPath();ctx.arc(pinchStar.x,pinchStar.y,2.4,0,Math.PI*2);ctx.fill();ctx.restore();} if(frame%5===0)face.send({image:video}).catch(()=>{}); if(frame%1===0)feedHands(); raf=requestAnimationFrame(render); }
+async function startMirror(){try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}}); video.srcObject=stream; await video.play(); audioContext=new (window.AudioContext||window.webkitAudioContext)();const source=audioContext.createMediaStreamSource(stream);analyser=audioContext.createAnalyser();analyser.fftSize=1024;source.connect(analyser);audioData=new Uint8Array(analyser.fftSize);
+  hands=new Hands({locateFile:file=>'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/'+file});hands.setOptions({maxNumHands:1,modelComplexity:1,minDetectionConfidence:.65,minTrackingConfidence:.6});hands.onResults(handleHands);
+  face=new FaceDetection({locateFile:file=>'https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/'+file});face.setOptions({model:'short',minDetectionConfidence:.55});face.onResults(handleFace);
+  clearFog(); start.classList.add('hidden');hud.classList.add('live'); render();
+ }catch(err){let msg='Camera or microphone access was refused. Please allow both permissions and try again.';if(!navigator.mediaDevices)msg='Camera access requires HTTPS or localhost. Open this page from a secure local server, not file://.';errorBox.textContent=msg;}}
+begin.addEventListener('click',startMirror); brushInput.addEventListener('input',()=>{}); shutter.addEventListener('click',saveFrame);
+function saveFrame(){const a=document.createElement('a');a.download='fog-mirror.png';a.href=canvas.toDataURL('image/png');a.click();}
+window.addEventListener('keydown',e=>{lastKey=performance.now();if(e.code==='Space'){e.preventDefault();spaceDown=true;}if(e.key.toLowerCase()==='c')clearFog();if(e.key.toLowerCase()==='s')saveFrame();if(e.key==='Escape'){if(stream)stream.getTracks().forEach(t=>t.stop());cancelAnimationFrame(raf);hud.classList.remove('live');start.classList.remove('hidden');}});window.addEventListener('keyup',e=>{if(e.code==='Space')spaceDown=false;});
+</script>
+</body>
+</html>
